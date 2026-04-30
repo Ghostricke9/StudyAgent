@@ -1,0 +1,34 @@
+.env
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 输出目录（生成的教材文件是用户数据，不提交）
+output/*
+
+# 保留 output 目录结构
+!output/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log

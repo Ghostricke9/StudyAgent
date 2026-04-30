@@ -1,0 +1,25 @@
+{
+    "mcpServers": {
+        "fetch": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-fetch"],
+            "description": "网页内容抓取MCP服务器，提供强大的网页内容获取能力",
+            "enabled": false
+        },
+        "brave-search": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+            "env": {
+                "BRAVE_API_KEY": "your-brave-api-key"
+            },
+            "description": "Brave搜索引擎MCP服务器",
+            "enabled": false
+        },
+        "filesystem": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "./output"],
+            "description": "文件系统MCP服务器，提供文件读写能力",
+            "enabled": false
+        }
+    }
+}
