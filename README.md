@@ -57,19 +57,19 @@
 ┌──────────────────────────────────────────────────────────────────┐
 │                        入口层 (Entry Point)                        │
 │   main.py (CLI)  /  ui/app.py (Web)                              │
-│   负责：接收用户输入、展示执行过程、输出最终结果                      │
+│   负责：接收用户输入、展示执行过程、输出最终结果                         │
 └─────────────────────────────┬────────────────────────────────────┘
                               │ 传入: user_input
                               ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                   Agent Core (Harness 主循环)                      │
-│   agent/core.py                                                   │
-│                                                                    │
-│   while iteration < MAX_TOOL_CALLS:                                │
-│     response = llm.chat(messages, tools=tool_schemas)   ──────┐  │
-│     if response has no tool_calls:                            │  │
+┌─────────────────────────────────────────────────────────────────┐
+│                   Agent Core (Harness 主循环)                    │
+│   agent/core.py                                                 │
+│                                                                 │
+│   while iteration < MAX_TOOL_CALLS:                             │
+│     response = llm.chat(messages, tools=tool_schemas)   ─────┐ │
+│     if response has no tool_calls:                           │  │
 │       return response.content  ← 最终答案                     │  │
-│     for each tool_call in response:                           │  │
+│     for each tool_call in response:                          │  │
 │       result = tool_executor(tool_name, tool_args)  ──────┐  │  │
 │       messages.append(tool_result)                        │  │  │
 │                                                           │  │  │
@@ -79,13 +79,13 @@
                               │  tool_schemas (所有可用工具定义)  │
                               ▼                                │
 ┌──────────────────────────────────────────────────────────┐   │
-│                 LLM Client (大模型接口)                     │   │
-│   agent/llm_client.py                                      │   │
-│                                                            │   │
-│   封装 OpenAI 兼容 API:                                     │   │
-│   - chat(messages, tools) → 支持 Function Call 的对话       │   │
+│                 LLM Client (大模型接口)                    │   │
+│   agent/llm_client.py                                    │   │
+│                                                          │   │
+│   封装 OpenAI 兼容 API:                                   │   │
+│   - chat(messages, tools) → 支持 Function Call 的对话     │   │
 │   - parse_tool_calls() → 从响应中提取工具调用               │   │
-│   - build_tool_schema() → 构造符合规范的 schema             │   │
+│   - build_tool_schema() → 构造符合规范的 schema            │   │
 └──────────────────────────────────────────────────────────┘   │
                                                                │
                               ┌────────────────────────────────┘
@@ -93,15 +93,15 @@
                               ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │              ToolBridge (三合一工具执行器)                          │
-│   tools/executor.py                                                │
-│                                                                    │
-│   execute(tool_name, args):                                        │
+│   tools/executor.py                                              │
+│                                                                  │
+│   execute(tool_name, args):                                      │
 │     if tool_name in LOCAL_TOOLS:        → 调用本地函数             │
 │     elif tool_name in SKILLS:           → 返回 Skill 提示词模板    │
 │     elif tool_name.startswith("mcp__"): → 转发给 MCP Server       │
-│                                                                    │
-│   get_all_schemas():                                               │
-│     return [本地工具 schemas] + [Skills schemas] + [MCP schemas]  │
+│                                                                  │
+│   get_all_schemas():                                             │
+│     return [本地工具 schemas] + [Skills schemas] + [MCP schemas]   │
 └────┬──────────────────┬──────────────────────┬────────────────────┘
      │                  │                      │
      ▼                  ▼                      ▼
@@ -121,7 +121,6 @@
 
 ### 2.2 主循环（ReAct Loop）详解
 
-这是整个 Agent 框架的心脏。看懂这一段，你就理解了所有 Agent（包括 Claude Code）的核心运作方式。
 
 ```python
 # agent/core.py 的核心逻辑（简化版）
@@ -183,7 +182,7 @@ class Agent:
 
 ### 2.3 消息流转全链路
 
-以下是一次完整调用的消息演变过程（带注释）：
+以下是一次完整调用的消息演变过程：
 
 ```python
 # ===== 初始状态 =====
