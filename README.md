@@ -548,6 +548,84 @@ LLM: 路线规划好了 → 开始搜索资料 → 编撰教材前先加载编�
 | load_skill 工具 | 无需为每个 Skill 单独写 schema——一个 `load_skill` 工具通吃所有 Skill |
 | 扩展性 | 添加新 Skill 只需新建目录 + SKILL.md，零代码改动 |
 
+### 富 Skill：包含子资源（模板 + 脚本）
+
+Claude Code 等成熟 Agent 框架中的 Skill 往往不止一个 `SKILL.md` 文件，还会附带**模板文件、示例代码、辅助脚本**。本项目的 `document-compiler` 技能就是这样一个例子。
+
+**目录结构：**
+
+```
+skills/document-compiler/
+├── SKILL.md                    # 技能主文件（必经入口）
+├── templates/
+│   ├── cover.md                # 教材封面模板
+│   └── style_guide.md          # 排版风格指南
+└── scripts/
+    └── word_counter.py         # 字数统计工具
+```
+
+**关键设计：SKILL.md 是入口，子资源按需引用**
+
+```
+LLM 调用 load_skill("document-compiler")
+  → 返回 SKILL.md 正文
+  → 正文中包含子资源文件路径和说明：
+      "使用 templates/cover.md 中的模板"
+      "执行 python {skill_dir}/scripts/word_counter.py <file> 检查篇幅"
+  → LLM 根据引导决定是否查看/执行子资源
+```
+
+**SKILL.md 中引用子资源的方式：**
+
+```markdown
+## 子资源文件
+
+本技能目录下附带辅助资源：
+
+| 文件 | 用途 |
+|------|------|
+| `templates/cover.md` | 封面模板 |
+| `templates/style_guide.md` | 风格指南 |
+| `scripts/word_counter.py` | 字数统计 |
+```
+
+LLM 读到这段自然会按需去取用这些子资源——就像你看一个 GitHub 项目的 README 后去翻 `examples/` 目录一样。
+
+**template 文件示例**（`templates/style_guide.md`）：
+
+```markdown
+# 教材排版风格指南
+- 中英文之间插入空格：`使用 Python 编程`
+- 代码块标注语言：```python
+- 每章控制在 2000-3000 字
+```
+
+**script 文件示例**（`scripts/word_counter.py`）：
+
+```python
+"""字数统计 —— 检查章节篇幅"""
+import sys, re
+
+def count_words(text: str) -> int:
+    en = len(re.findall(r"[a-zA-Z]+", text))
+    cn = len(re.findall(r"[\u4e00-\u9fff]", text))
+    return en + cn
+
+with open(sys.argv[1], "r") as f:
+    text = f.read()
+print(f"总字数: {count_words(text)}")
+```
+
+### 富 Skill 设计原则
+
+| 原则 | 说明 |
+|------|------|
+| SKILL.md 为入口 | SkillLoader 只加载 SKILL.md，其他文件由 LLM 根据 SKILL.md 中的指引按需访问 |
+| 路径用相对路径 | `templates/cover.md` 而非绝对路径——LLM 能基于 Skill 目录拼接 |
+| 脚本最小化 | 脚本应该是简洁的单文件，有明确的输入输出，便于 LLM 理解和执行 |
+| 模板用 Markdown | 全文统一 Markdown 格式，减少 LLM 需要处理的文件类型 |
+| 引用清晰 | SKILL.md 中明确标注每个子文件的路径和用途 |
+
 ---
 
 ## 6. 教学：如何接入 MCP Server
@@ -805,8 +883,15 @@ studyhelper/
 │   ├── registry.py             # SkillLoader: rglob("SKILL.md") 自动扫描
 │   ├── knowledge-compiler/     # 技能: 教材编撰
 │   │   └── SKILL.md            #   YAML frontmatter + 编撰指导正文
-│   └── exercise-generator/     # 技能: 练习题生成
-│       └── SKILL.md            #   YAML frontmatter + 出题指导正文
+│   ├── exercise-generator/     # 技能: 练习题生成
+│   │   └── SKILL.md            #   YAML frontmatter + 出题指导正文
+│   └── document-compiler/      # 富 Skill: 教材汇编（含子资源）
+│       ├── SKILL.md            #   技能主入口
+│       ├── templates/          #   模板文件
+│       │   ├── cover.md        #     封面模板
+│       │   └── style_guide.md  #     风格指南
+│       └── scripts/            #   辅助脚本
+│           └── word_counter.py #     字数统计工具
 │
 ├── mcp/                        # MCP 工具层
 │   ├── client.py               # stdio JSON-RPC 2.0 客户端

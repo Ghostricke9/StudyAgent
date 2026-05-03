@@ -90,7 +90,6 @@ class Agent:
             if not tool_calls:
                 yield ("text", assistant_msg.get("content", ""))
                 return
-
             for tc in tool_calls:
                 yield ("tool_start", {"name": tc["name"], "args": tc["arguments"]})
 
