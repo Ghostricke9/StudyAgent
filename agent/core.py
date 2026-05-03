@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Callable
 
-from config import SYSTEM_PROMPT, MAX_TOOL_CALLS
+from config import MAX_TOOL_CALLS
 from agent.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -21,16 +21,18 @@ class Agent:
         tool_schemas: list[dict] | None = None,
         tool_executor: ToolExecutor | None = None,
         on_step: Callable[[str, str, str], None] | None = None,
+        system_prompt: str = "",
     ):
         self.llm = llm or LLMClient()
         self.tool_schemas = tool_schemas or []
         self.tool_executor = tool_executor or (lambda name, args: "")
         self.on_step = on_step
+        self.system_prompt = system_prompt
         self.messages: list[dict] = []
 
     def run(self, user_input: str) -> str:
         self.messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_input},
         ]
 
@@ -71,7 +73,7 @@ class Agent:
     def stream_run(self, user_input: str):
         """流式运行，逐步 yield (type, content)"""
         self.messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_input},
         ]
 

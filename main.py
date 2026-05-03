@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
 
-from config import OUTPUT_DIR
+from config import OUTPUT_DIR, build_system_prompt
 from agent.core import Agent
 from agent.llm_client import LLMClient
 from tools.executor import create_bridge
@@ -53,6 +53,7 @@ def main():
         tool_schemas=bridge.get_all_schemas(),
         tool_executor=bridge.execute,
         on_step=on_agent_step,
+        system_prompt=build_system_prompt(),
     )
 
     console.print("[dim]Agent 就绪！开始工作...[/]\n")

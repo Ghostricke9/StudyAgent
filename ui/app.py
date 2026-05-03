@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent.core import Agent
 from agent.llm_client import LLMClient
 from tools.executor import create_bridge
-from config import OUTPUT_DIR
+from config import OUTPUT_DIR, build_system_prompt
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -56,6 +56,7 @@ def init_agent():
         tool_schemas=bridge.get_all_schemas(),
         tool_executor=bridge.execute,
         on_step=on_step,
+        system_prompt=build_system_prompt(),
     )
     return agent, bridge
 
