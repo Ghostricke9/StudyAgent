@@ -57,66 +57,67 @@
 ┌──────────────────────────────────────────────────────────────────┐
 │                        入口层 (Entry Point)                        │
 │   main.py (CLI)  /  ui/app.py (Web)                              │
-│   负责：接收用户输入、展示执行过程、输出最终结果                         │
+│   负责：接收用户输入、展示执行过程、输出最终结果                      │
 └─────────────────────────────┬────────────────────────────────────┘
                               │ 传入: user_input
                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   Agent Core (Harness 主循环)                    │
-│   agent/core.py                                                 │
-│                                                                 │
-│   while iteration < MAX_TOOL_CALLS:                             │
-│     response = llm.chat(messages, tools=tool_schemas)   ─────┐ │
-│     if response has no tool_calls:                           │  │
+┌──────────────────────────────────────────────────────────────────┐
+│                   Agent Core (Harness 主循环)                      │
+│   agent/core.py                                                   │
+│                                                                    │
+│   while iteration < MAX_TOOL_CALLS:                                │
+│     response = llm.chat(messages, tools=tool_schemas)   ──────┐  │
+│     if response has no tool_calls:                            │  │
 │       return response.content  ← 最终答案                     │  │
-│     for each tool_call in response:                          │  │
+│     for each tool_call in response:                           │  │
 │       result = tool_executor(tool_name, tool_args)  ──────┐  │  │
 │       messages.append(tool_result)                        │  │  │
 │                                                           │  │  │
 └───────────────────────────────────────────────────────────┼──┼──┘
                                                             │  │
-                              ┌─────────────────────────────┘  │
-                              │  tool_schemas (所有可用工具定义)  │
-                              ▼                                │
+                  ┌─────────────────────────────────────────┘  │
+                  │  tool_schemas (本地 + load_skill + MCP)     │
+                  │  system_prompt (含 Skill 描述 - Layer 1)    │
+                  ▼                                            │
 ┌──────────────────────────────────────────────────────────┐   │
-│                 LLM Client (大模型接口)                    │   │
-│   agent/llm_client.py                                    │   │
-│                                                          │   │
-│   封装 OpenAI 兼容 API:                                   │   │
-│   - chat(messages, tools) → 支持 Function Call 的对话     │   │
+│                 LLM Client (大模型接口)                     │   │
+│   agent/llm_client.py                                      │   │
+│                                                            │   │
+│   封装 OpenAI 兼容 API:                                     │   │
+│   - chat(messages, tools) → 支持 Function Call 的对话       │   │
 │   - parse_tool_calls() → 从响应中提取工具调用               │   │
-│   - build_tool_schema() → 构造符合规范的 schema            │   │
+│   - build_tool_schema() → 构造符合规范的 schema             │   │
 └──────────────────────────────────────────────────────────┘   │
                                                                │
-                              ┌────────────────────────────────┘
-                              │  tool_executor(name, args)
-                              ▼
+                  ┌────────────────────────────────────────────┘
+                  │  tool_executor(name, args)
+                  ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│              ToolBridge (三合一工具执行器)                          │
-│   tools/executor.py                                              │
-│                                                                  │
-│   execute(tool_name, args):                                      │
+│              ToolBridge (统一工具执行器)                            │
+│   tools/executor.py                                                │
+│                                                                    │
+│   execute(tool_name, args):                                        │
 │     if tool_name in LOCAL_TOOLS:        → 调用本地函数             │
-│     elif tool_name in SKILLS:           → 返回 Skill 提示词模板    │
 │     elif tool_name.startswith("mcp__"): → 转发给 MCP Server       │
-│                                                                  │
-│   get_all_schemas():                                             │
-│     return [本地工具 schemas] + [Skills schemas] + [MCP schemas]   │
-└────┬──────────────────┬──────────────────────┬────────────────────┘
-     │                  │                      │
-     ▼                  ▼                      ▼
-┌──────────┐   ┌──────────────┐   ┌──────────────────────┐
-│ 本地工具层 │   │  Skills 技能层 │   │     MCP 工具层        │
-│          │   │              │   │                      │
-│ web_search│   │ compile_     │   │ mcp__fetch           │
-│ fetch_web │   │   knowledge  │   │ mcp__brave_search    │
-│ save_file │   │ generate_    │   │ mcp__filesystem_*    │
-│          │   │   exercises  │   │ ... (自动发现)        │
-│ 本质:     │   │              │   │                      │
-│ Python    │   │ 本质:        │   │ 本质:                 │
-│ 函数直接  │   │ 返回提示词    │   │ 通过 stdio JSON-RPC  │
-│ 执行      │   │ 模板给 LLM   │   │ 调用外部进程工具      │
-└──────────┘   └──────────────┘   └──────────────────────┘
+└──────────────────────────────┬────────────────────────────────────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          ▼                    ▼                    ▼
+┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
+│   本地工具层      │  │  Skills 技能层   │  │    MCP 工具层     │
+│                 │  │  (间接调用)      │  │                  │
+│ web_search      │  │                 │  │ mcp__fetch        │
+│ fetch_webpage   │  │ [启动时]        │  │ mcp__brave_search │
+│ save_document   │  │ SkillLoader     │  │ ... (自动发现)     │
+│ load_skill ─────┼──┤ 扫描 SKILL.md   │  │                  │
+│                 │  │ → 注入 system   │  │ 本质:             │
+│ 本质:           │  │   prompt (L1)   │  │ 通过 stdio        │
+│ Python 函数     │  │                 │  │ JSON-RPC 调用     │
+│ 直接执行        │  │ [运行时]        │  │ 外部进程工具      │
+│                 │  │ load_skill()    │  │                  │
+│                 │  │ → 返回完整      │  │                  │
+│                 │  │   SKILL.md (L2) │  │                  │
+└─────────────────┘  └─────────────────┘  └──────────────────┘
 ```
 
 ### 2.2 主循环（ReAct Loop）详解
@@ -213,13 +214,17 @@ messages.append({
 # LLM 返回: tool_calls → fetch_webpage(url)
 # 执行 → 追加 tool 消息
 
-# ===== 第3轮：LLM 看到正文，决定开始编撰 =====
-# LLM 返回: tool_calls → compile_knowledge(chapter_title="第1章", ...)
-# Skill 执行 → 返回提示词模板
-# 追加 tool 消息（内容是提示词模板）
+# ===== 第3轮：LLM 看到正文，决定加载编撰技能 =====
+# LLM 返回: tool_calls → load_skill(name="knowledge-compiler")
+# load_skill 执行 → 返回完整的 SKILL.md 正文（Layer 2 渐进式披露）
+# 追加 tool 消息（内容是编撰指导）
 
-# ===== 第4轮：LLM 看到提示词模板，生成教材内容（text 响应）=====
-# 但教材内容还在 assistant 消息里，LLM 可能继续调 compile_knowledge 写下一章...
+# ===== 第4轮：LLM 读到技能指导，按格式生成第1章教材（text 响应）=====
+# LLM 可能继续生成第2章、第3章...
+
+# ===== 第N-2轮：LLM 决定加载出题技能 =====
+# LLM 返回: tool_calls → load_skill(name="exercise-generator")
+# 返回出题指导 → LLM 按格式为每章生成练习题
 
 # ===== 第N轮：全部完成 =====
 # LLM 返回: {"role": "assistant", "content": "我已经为你生成了完整的教材..."}
@@ -260,7 +265,7 @@ TOOL_REGISTRY = {
 | 层 | handler 是什么 | schema 来源 |
 |----|---------------|-------------|
 | 本地工具 | Python 函数直接调用 | 代码中硬编码的 schema 字典 |
-| Skills | 返回一段填充好的提示词文本 | 代码中硬编码的 schema 字典 |
+| Skills (load_skill) | `SkillLoader` 返回 SKILL.md 正文 | LLM 通过 `load_skill` 工具按需获取（渐进式披露） |
 | MCP | 通过 JSON-RPC 转发到外部进程 | `tools/list` 动态获取，运行时转换 |
 
 ---
@@ -286,10 +291,11 @@ Function Call (机制)
     ├── Skills (技能)
     │   │
     │   │  是 "怎么让 LLM 高质量完成复杂任务" 的提示词工程手段
-    │   │  本质: 不是执行代码，而是返回一段详细的任务说明
-    │   │        LLM 收到后把它当上下文，按说明生成高质量内容
+    │   │  本质: 不是执行代码，而是通过「渐进式披露」让 LLM 获取详细任务指导
+    │   │        Layer 1 — system prompt 仅注入技能名 + 一行描述（~20 token/技能）
+    │   │        Layer 2 — LLM 按需调用 load_skill(name) 获取完整的 SKILL.md 正文
     │   │  适用: 编撰文档、出题、翻译、审校等纯 LLM 能力可完成的任务
-    │   │  类比 Claude Code: 类似 custom slash commands 注入的提示词
+    │   │  类比 Claude Code: 类似 Skills 目录下的 SKILL.md 文件
     │   │
     └── MCP (外部工具)
         │
@@ -436,69 +442,48 @@ CALCULATOR_SCHEMA = {
 
 ---
 
-## 5. 教学：如何添加自己的 Skill
+## 5. 教学：如何添加自己的 Skill（渐进式披露）
 
 ### Skill 的本质
 
-Skill 和 Tool 的根本区别：
-
+Skill 不直接作为 Function Call 工具。它采用**渐进式披露**：
 ```
-Tool 的 handler:  执行代码 → 返回数据
-Skill 的 handler: 不执行代码 → 直接返回一段"引导提示词"
-                           → LLM 读到这段提示词后，按要求生成内容
+Layer 1 (启动时): System Prompt 仅注入技能名 + 一行描述（极省 token）
+Layer 2 (运行时): LLM 调用 load_skill(name) 获取完整 SKILL.md 正文
 ```
 
-**为什么要有 Skill？** 因为有些任务无法用代码完成——比如"写一篇好文章"、"出一套有质量的题"。这些任务的本质是引导 LLM 进入特定的输出模式。Skill 就是把这种引导**标准化**成可复用的模块。
+**为什么要有 Skill？** 因为有些任务无法用代码完成——比如"写一篇好文章"、"出一套有质量的题"。这些任务的本质是引导 LLM 进入特定的输出模式。Skill 就是把这种引导**标准化**成可复用的模块，同时用渐进式披露避免撑爆 context window。
 
 ### 模式总结
 
-添加一个 Skill，需要做 **3 件事**：
+添加一个 Skill，只需要做 **2 件事**：
 
 ```
-1. 写一个 schema 字典（让 LLM 知道什么时候调用这个 Skill）
-2. 写一段提示词模板（Skill 的核心内容，LLM 收到后按此执行）
-3. 在 SKILL_DEFINITIONS 中注册
+1. 在 skills/ 下新建目录，放入 SKILL.md（含 YAML frontmatter + 正文）
+2. 无需注册代码！SkillLoader 启动时自动 rglob("SKILL.md") 扫描
 ```
 
 ### 伪例：添加"学习路线规划"Skill
 
-```python
-# ===== skills/learning_path.py =====
+**步骤1: 创建 `skills/learning-path/SKILL.md`**
 
-# 1. Schema：告诉 LLM 这个 Skill 是干什么的
-LEARNING_PATH_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "plan_learning_path",
-        "description": "为用户规划学习路线，分阶段列出要学的内容和资源",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "topic": {
-                    "type": "string",
-                    "description": "学习主题",
-                },
-                "user_level": {
-                    "type": "string",
-                    "enum": ["零基础", "入门", "中级", "高级"],
-                    "description": "用户当前水平",
-                },
-            },
-            "required": ["topic", "user_level"],
-        },
-    },
-}
+```markdown
+---
+name: learning-path
+description: 为用户规划学习路线，分阶段列出要学的内容和资源
+tags: [teaching, planning]
+---
 
-# 2. 提示词模板：这是 Skill 的核心
-#    注意 {{topic}} 和 {{user_level}} 会被 SkillRegistry.execute() 自动替换
-LEARNING_PATH_PROMPT = """## 任务：规划学习路线
+## 技能：规划学习路线
 
-### 主题: {{topic}}
-### 用户水平: {{user_level}}
+### 何时使用
+当用户想系统学习某个主题时，调用此技能为其规划学习路线。
 
-请为这个主题制定一份详细的学习路线图，按以下格式输出：
+### 输出格式
 
-## {{topic}} 学习路线图
+请按以下格式输出学习路线：
+
+## [主题] 学习路线图
 
 ### 学习概览
 - 预计总时长: [估算]
@@ -512,11 +497,9 @@ LEARNING_PATH_PROMPT = """## 任务：规划学习路线
 | 1 | ... | ... | ... |
 
 ### 阶段二: 核心进阶 (预计 X 周)
-**学习目标**: [描述]
 ...
 
 ### 阶段三: 实战应用 (预计 X 周)
-**学习目标**: [描述]
 ...
 
 ### 推荐学习资源汇总
@@ -526,47 +509,44 @@ LEARNING_PATH_PROMPT = """## 任务：规划学习路线
 
 ### 阶段性检验标准
 [如何判断自己掌握了每个阶段的内容]
-
-请直接输出学习路线图，不要输出其他无关内容。"""
 ```
 
-```python
-# ===== 在 skills/registry.py 中注册 =====
+**步骤2: 什么都不用做！** SkillLoader 在 `Agent` 启动时自动扫描所有 `SKILL.md`：
+- frontmatter 中的 `name` 和 `description` 自动注入到 Layer 1（system prompt）
+- 技能正文通过 `load_skill("learning-path")` 按需返回（Layer 2）
 
-from skills.learning_path import LEARNING_PATH_SCHEMA, LEARNING_PATH_PROMPT
-
-SKILL_DEFINITIONS["plan_learning_path"] = {
-    "schema": LEARNING_PATH_SCHEMA,
-    "handler": LEARNING_PATH_PROMPT,
-    "description": "为用户规划学习路线",
-}
-```
-
-### Skill 的调用流（与 Tool 的区别一目了然）
+### 渐进式披露的完整调用流
 
 ```
-# Tool 的调用流:
-LLM 调用 fetch_webpage(url)
-  → Python 执行 requests.get(url)
-  → 返回网页正文文本
-  → LLM 读到文本，继续处理
+Agent 启动
+  ↓
+System Prompt 注入:
+  Skills available:
+    - knowledge-compiler: 将搜索和研究资料编撰成结构化的教材 [writing,teaching]
+    - exercise-generator: 根据教学内容生成配套练习题 [teaching,exercise]
+    - learning-path: 为用户规划学习路线 [teaching,planning]
+  ↓                                  （Layer 1: 仅 3 行，~60 token）
 
-# Skill 的调用流:
-LLM 调用 plan_learning_path(topic="Python", user_level="零基础")
-  → SkillRegistry.execute() 不执行任何代码
-  → 直接返回填充好的提示词模板（一大段文字）
-  → LLM 读到这段提示词，按要求生成学习路线
-  → LLM 把生成的内容作为下一轮的 assistant 消息
+LLM: 用户想学 Python → 我需要先规划学习路线
+  → 调用 load_skill("learning-path")
+  → 工具返回完整的 SKILL.md 正文     （Layer 2: 按需加载，~500 token）
+  → LLM 根据指导生成学习路线图
+
+LLM: 路线规划好了 → 开始搜索资料 → 编撰教材前先加载编撰技能
+  → 调用 load_skill("knowledge-compiler")
+  → 返回编撰指导 → LLM 逐章生成教材
 ```
 
 ### 关键点
 
 | 关注点 | 注意事项 |
 |--------|---------|
-| 占位符格式 | 模板中用 `{{变量名}}`，`SkillRegistry.execute()` 自动替换 |
-| 提示词质量 | Skill 的提示词越详细、格式要求越明确，LLM 的输出质量越高 |
-| 分步调用 | 复杂任务（如编撰教材）应该让 LLM 分多次调用 Skill，每次一个章节 |
-| Handler 不是函数 | Skill 的 handler 是**字符串**，不是 callable，这一点和 Tool 完全不同 |
+| 目录结构 | 每个 Skill 一个独立目录，内含 `SKILL.md` |
+| YAML frontmatter | 必须包含 `name` 和 `description`，`tags` 可选 |
+| 自动发现 | `SkillLoader._load_all()` 通过 `rglob("SKILL.md")` 自动扫描 |
+| 降级解析 | 无 pyyaml 时自动降级为简易 YAML 解析器 |
+| load_skill 工具 | 无需为每个 Skill 单独写 schema——一个 `load_skill` 工具通吃所有 Skill |
+| 扩展性 | 添加新 Skill 只需新建目录 + SKILL.md，零代码改动 |
 
 ---
 
@@ -815,15 +795,18 @@ studyhelper/
 │   └── llm_client.py           # LLM 客户端（Function Call 封装）
 │
 ├── tools/                      # 本地工具层
-│   ├── executor.py             # 三合一桥接执行器（ToolBridge）
+│   ├── executor.py             # ToolBridge: 本地 + MCP 统一执行
 │   ├── web_search.py           # DuckDuckGo 网页搜索
 │   ├── web_fetch.py            # 网页正文抓取 + 清洗
-│   └── file_tools.py           # 文件保存 / 读取
+│   ├── file_tools.py           # 文件保存 / 读取
+│   └── load_skill.py           # Skill 按需加载（Layer 2 入口）
 │
-├── skills/                     # Skills 技能层
-│   ├── registry.py             # 技能注册中心 + 执行分发
-│   ├── knowledge_compiler.py   # 教材编撰技能（schema + prompt）
-│   └── exercise_generator.py   # 练习题生成技能（schema + prompt）
+├── skills/                     # Skills 技能层（渐进式披露）
+│   ├── registry.py             # SkillLoader: rglob("SKILL.md") 自动扫描
+│   ├── knowledge-compiler/     # 技能: 教材编撰
+│   │   └── SKILL.md            #   YAML frontmatter + 编撰指导正文
+│   └── exercise-generator/     # 技能: 练习题生成
+│       └── SKILL.md            #   YAML frontmatter + 出题指导正文
 │
 ├── mcp/                        # MCP 工具层
 │   ├── client.py               # stdio JSON-RPC 2.0 客户端
@@ -919,7 +902,7 @@ class Agent:
 | Tool 系统 | `tools/` 目录 + `tools/executor.py` | 工具注册模式 |
 | `.mcp.json` | `mcp_servers.json` | MCP 配置格式 |
 | MCP Client | `mcp/client.py` | stdio JSON-RPC 实现 |
-| Skills / Custom Slash Commands | `skills/` 目录 | 提示词模板注入模式 |
+| Skills 系统 | `skills/` + `load_skill` 工具 | SKILL.md 渐进式披露 (Layer 1→2) |
 | System Prompt | `config.py` 的 `SYSTEM_PROMPT` | Agent 人设设计 |
 | Context Window 管理 | 本项目未实现 | 需自己补充（见进阶第3步） |
 | Tool 并行执行 | 本项目未实现 | 需自己补充（见进阶第4步） |
