@@ -8,6 +8,7 @@ from typing import Callable
 
 from config import MAX_TOOL_CALLS
 from agent.llm_client import LLMClient
+from tools.todo_write import mark_todo_round
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ class Agent:
         ]
 
         for iteration in range(MAX_TOOL_CALLS):
+            reminder = mark_todo_round(False)
+            if reminder:
+                self.messages.append({"role": "system", "content": f"[TodoWrite 提醒] {reminder}"})
+
             response = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
             assistant_msg = self.llm.assistant_message(response)
 
@@ -48,6 +53,8 @@ class Agent:
             tool_calls = self.llm.parse_tool_calls(response)
             if not tool_calls:
                 return assistant_msg.get("content", "")
+
+            had_todo = any(tc["name"] == "todo_write" for tc in tool_calls)
 
             for tc in tool_calls:
                 tool_name = tc["name"]
@@ -68,16 +75,21 @@ class Agent:
                     self.llm.format_tool_result(tool_id, result)
                 )
 
+            mark_todo_round(had_todo)
+
         return "已达到最大工具调用次数，但任务可能未完成。请尝试更具体的问题。"
 
     def stream_run(self, user_input: str):
-        """流式运行，逐步 yield (type, content)"""
         self.messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_input},
         ]
 
         for iteration in range(MAX_TOOL_CALLS):
+            reminder = mark_todo_round(False)
+            if reminder:
+                self.messages.append({"role": "system", "content": f"[TodoWrite 提醒] {reminder}"})
+
             response = self.llm.chat(messages=self.messages, tools=self.tool_schemas)
             assistant_msg = self.llm.assistant_message(response)
 
@@ -90,6 +102,9 @@ class Agent:
             if not tool_calls:
                 yield ("text", assistant_msg.get("content", ""))
                 return
+
+            had_todo = any(tc["name"] == "todo_write" for tc in tool_calls)
+
             for tc in tool_calls:
                 yield ("tool_start", {"name": tc["name"], "args": tc["arguments"]})
 
@@ -104,6 +119,8 @@ class Agent:
 
                 yield ("tool_end", {"name": tool_name, "result_preview": result[:500]})
                 self.messages.append(self.llm.format_tool_result(tool_id, result))
+
+            mark_todo_round(had_todo)
 
         yield ("text", "已达到最大工具调用次数。")
 

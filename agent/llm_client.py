@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class LLMClient:
     def __init__(self):
-        self.client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL,temperature=0.7)
+        self.client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
         self.model = OPENAI_MODEL
 
     def chat(
@@ -26,6 +26,7 @@ class LLMClient:
         kwargs: dict[str, Any] = dict(
             model=self.model,
             messages=messages,
+            temperature = 0.7
         )
         if tools:
             kwargs["tools"] = tools

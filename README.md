@@ -442,6 +442,107 @@ CALCULATOR_SCHEMA = {
 
 ---
 
+### 伪例 3：TodoWrite 任务管理工具（已内置本项目）
+
+这是本项目**已实现**的一个重要工具，展示了"工具不止是执行逻辑，还可以和框架层双向交互"的设计模式。
+
+**问题背景：** 在多步复杂任务中，LLM 容易"迷路"——忘记做过什么、重复执行已完成步骤、遗漏子任务。TodoWrite 通过两个机制解决这个问题：
+
+```
+机制 1: 强制顺序聚焦
+  → 同时只能有一个 in_progress 任务
+  → 强制性要求 LLM 做完一个再做下一个
+
+机制 2: 静止检测 + 提醒注入
+  → 框架层计数：连续 N 轮不调用 todo_write
+  → 超过阈值 (3轮) → 自动在消息列表中注入提醒
+  → 提醒内容包括当前任务状态，引导 LLM 回到正轨
+```
+
+**核心代码解析：**
+
+```python
+# tools/todo_write.py 的核心逻辑
+
+class TodoManager:
+    def __init__(self):
+        self.items: list[dict] = []       # 当前任务列表
+        self._rounds_without_todo = 0     # 未调用 todo 的连续轮次
+
+    def update(self, items: list) -> str:
+        """验证并更新任务列表，强制只有一个 in_progress"""
+        validated, in_progress_count = [], 0
+        for item in items:
+            status = item.get("status", "pending")
+            if status == "in_progress":
+                in_progress_count += 1
+            validated.append({
+                "id": item["id"], "text": item["text"], "status": status
+            })
+        if in_progress_count > 1:
+            raise ValueError("Only one task can be in_progress")
+        self.items = validated
+        self._rounds_without_todo = 0     # 调用了 todo → 重置计数
+        return self.render()
+
+    def mark_round(self, had_todo_call: bool) -> str | None:
+        """每轮 Agent 循环结束后调用，计数并决定是否注入提醒"""
+        if had_todo_call:
+            self._rounds_without_todo = 0
+            return None
+        self._rounds_without_todo += 1
+        if self._rounds_without_todo >= REMINDER_THRESHOLD:  # 3轮
+            return self._build_reminder()
+        return None
+```
+
+**框架层注入逻辑：**
+
+```python
+# agent/core.py 中的集成
+
+class Agent:
+    def run(self, user_input: str) -> str:
+        for iteration in range(MAX_TOOL_CALLS):
+            # 第1步: 每轮开始先检查是否需要注入提醒
+            reminder = mark_todo_round(False)  # 先假设本轮无 todo 调用
+            if reminder:
+                # 作为 system 消息注入到对话历史
+                self.messages.append(
+                    {"role": "system", "content": f"[TodoWrite 提醒] {reminder}"}
+                )
+
+            # 第2步: LLM 决策
+            response = self.llm.chat(...)
+            tool_calls = parse_tool_calls(response)
+
+            # 第3步: 本轮结束后，告知 TodoManager 是否调用了 todo_write
+            had_todo = any(tc["name"] == "todo_write" for tc in tool_calls)
+            mark_todo_round(had_todo)  # 如果调用了 → 重置计数器
+```
+
+**完整调用时序：**
+
+```
+轮次 1: LLM 调用 todo_write(规划任务)  → had_todo=True  → 计数器重置为 0
+轮次 2: LLM 调用 web_search            → had_todo=False → 计数器 = 1
+轮次 3: LLM 调用 fetch_webpage         → had_todo=False → 计数器 = 2
+轮次 4: LLM 调用 fetch_webpage         → had_todo=False → 计数器 = 3 → 注入提醒！
+  → 注入: "[TodoWrite 提醒] 已连续3轮未更新任务列表。请调用 todo_write 检查进度..."
+轮次 5: LLM 收到提醒，调用 todo_write(标记完成+开启新任务) → 计数器重置
+```
+
+**设计要点：**
+
+| 要点 | 说明 |
+|------|------|
+| 双向交互 | Tool 不再只是"被调用→返回结果"，而是通过全局状态和框架层互相感知 |
+| 计数位置 | `mark_round(False)` 在每轮 **开始时** 调用（注入提醒），`mark_round(had_todo)` 在每轮 **结束后** 调用（更新计数器） |
+| 提醒内容 | 如果任务列表非空，提醒会包含当前所有任务的渲染结果，帮助 LLM 快速回忆上下文 |
+| 合并模式 | `merge=true` 支持增量添加新任务而不丢失已有进度 |
+
+---
+
 ## 5. 教学：如何添加自己的 Skill（渐进式披露）
 
 ### Skill 的本质
@@ -877,7 +978,8 @@ studyhelper/
 │   ├── web_search.py           # DuckDuckGo 网页搜索
 │   ├── web_fetch.py            # 网页正文抓取 + 清洗
 │   ├── file_tools.py           # 文件保存 / 读取
-│   └── load_skill.py           # Skill 按需加载（Layer 2 入口）
+│   ├── load_skill.py           # Skill 按需加载（Layer 2 入口）
+│   └── todo_write.py           # 多步任务进度管理（防丢失+强制顺序聚焦）
 │
 ├── skills/                     # Skills 技能层（渐进式披露）
 │   ├── registry.py             # SkillLoader: rglob("SKILL.md") 自动扫描
@@ -944,6 +1046,7 @@ LOCAL_TOOLS["web_search"] = web_search
 # 问题：长对话会超出 token 限制
 
 # 改造方案：
+# 三层压缩
 # 1. Token 计数 — 用 tiktoken 计算当前 messages 总 token 数
 # 2. 智能截断 — 超过阈值时压缩最旧的 tool 结果或做摘要
 # 3. 分层记忆 — 短期记忆（最近N轮）+ 长期记忆（向量检索）
@@ -991,6 +1094,13 @@ class Agent:
 | System Prompt | `config.py` 的 `SYSTEM_PROMPT` | Agent 人设设计 |
 | Context Window 管理 | 本项目未实现 | 需自己补充（见进阶第3步） |
 | Tool 并行执行 | 本项目未实现 | 需自己补充（见进阶第4步） |
+| TodoWrite 任务管理 | `tools/todo_write.py` + `agent/core.py` 注入逻辑 | 防丢失 + 强制顺序聚焦 |
+| 任务管理系统（多agent协作基础） | 本项目未实现 | 需自己补充 |
+| background_task | 本项目未实现 | 需自己补充 |
+| agent_teams | 本项目未实现 | 需自己补充 |
+| team_protocols(组内通信标准) | 本项目未实现 | 需自己补充 |
+| autonomous_agents(自动认领任务) | 本项目未实现 | 需自己补充 |
+| worktree_task_isolation(任务隔离) | 本项目未实现 | 需自己补充 |
 
 ---
 

@@ -11,6 +11,7 @@ from tools.web_search import web_search, TOOL_SCHEMA as SEARCH_SCHEMA
 from tools.web_fetch import fetch_webpage, TOOL_SCHEMA as FETCH_SCHEMA
 from tools.file_tools import save_document, TOOL_SCHEMA as SAVE_SCHEMA
 from tools.load_skill import load_skill, TOOL_SCHEMA as LOAD_SKILL_SCHEMA
+from tools.todo_write import todo_write, TOOL_SCHEMA as TODO_SCHEMA, mark_todo_round
 from mcp.manager import MCPManager
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,10 @@ LOCAL_TOOLS: dict[str, callable] = {
     "fetch_webpage": fetch_webpage,
     "save_document": save_document,
     "load_skill": load_skill,
+    "todo_write": todo_write,
 }
 
-LOCAL_TOOL_SCHEMAS = [SEARCH_SCHEMA, FETCH_SCHEMA, SAVE_SCHEMA, LOAD_SKILL_SCHEMA]
+LOCAL_TOOL_SCHEMAS = [SEARCH_SCHEMA, FETCH_SCHEMA, SAVE_SCHEMA, LOAD_SKILL_SCHEMA, TODO_SCHEMA]
 
 
 class ToolBridge:
