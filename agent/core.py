@@ -6,8 +6,9 @@ import json
 import logging
 from typing import Callable
 
-from config import MAX_TOOL_CALLS
+from config import MAX_TOOL_CALLS, COMPACT_TOKEN_THRESHOLD, ENABLE_COMPACTION
 from agent.llm_client import LLMClient
+from agent.compactor import micro_compact, auto_compact, estimate_tokens
 from tools.todo_write import mark_todo_round
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,19 @@ class Agent:
         ]
 
         for iteration in range(MAX_TOOL_CALLS):
+            if ENABLE_COMPACTION:
+                micro_compact(self.messages)
+
+                current_tokens = estimate_tokens(self.messages)
+                if current_tokens > COMPACT_TOKEN_THRESHOLD:
+                    logger.warning(
+                        f"触发 auto_compact: {current_tokens} tokens > 阈值 {COMPACT_TOKEN_THRESHOLD}"
+                    )
+                    self._notify("compact_start", "auto", str(current_tokens))
+                    self.messages[:] = auto_compact(self.messages, self.llm)
+                    self.messages.insert(0, {"role": "system", "content": self.system_prompt})
+                    self._notify("compact_end", "auto", str(estimate_tokens(self.messages)))
+
             reminder = mark_todo_round(False)
             if reminder:
                 self.messages.append({"role": "system", "content": f"[TodoWrite 提醒] {reminder}"})
@@ -52,7 +66,15 @@ class Agent:
 
             tool_calls = self.llm.parse_tool_calls(response)
             if not tool_calls:
-                return assistant_msg.get("content", "")
+                content = assistant_msg.get("content", "")
+                if ENABLE_COMPACTION and "[COMPACT]" in content:
+                    logger.info("LLM 请求手动压缩 (Layer 3)")
+                    self._notify("compact_start", "manual", str(estimate_tokens(self.messages)))
+                    self.messages[:] = auto_compact(self.messages, self.llm)
+                    self.messages.insert(0, {"role": "system", "content": self.system_prompt})
+                    self._notify("compact_end", "manual", str(estimate_tokens(self.messages)))
+                    continue
+                return content
 
             had_todo = any(tc["name"] == "todo_write" for tc in tool_calls)
 
@@ -69,13 +91,22 @@ class Agent:
                     result = f"工具执行出错: {e}"
                     logger.exception(f"Tool '{tool_name}' failed")
 
-                self._notify("tool_end", tool_name, result[:500])
+                self._notify("tool_end", tool_name, result[:200])
+
+                if tool_name == "todo_write":
+                    try:
+                        from tools.todo_write import get_todo_manager
+                        todo_items = get_todo_manager().items
+                        self._notify("todo_update", "", json.dumps(todo_items, ensure_ascii=False))
+                    except Exception:
+                        pass
 
                 self.messages.append(
                     self.llm.format_tool_result(tool_id, result)
                 )
 
             mark_todo_round(had_todo)
+            self._notify("round_end", "", str(iteration + 1))
 
         return "已达到最大工具调用次数，但任务可能未完成。请尝试更具体的问题。"
 
@@ -86,6 +117,19 @@ class Agent:
         ]
 
         for iteration in range(MAX_TOOL_CALLS):
+            if ENABLE_COMPACTION:
+                micro_compact(self.messages)
+
+                current_tokens = estimate_tokens(self.messages)
+                if current_tokens > COMPACT_TOKEN_THRESHOLD:
+                    logger.warning(
+                        f"触发 auto_compact: {current_tokens} tokens > 阈值 {COMPACT_TOKEN_THRESHOLD}"
+                    )
+                    yield ("compact_start", {"mode": "auto", "tokens_before": current_tokens})
+                    self.messages[:] = auto_compact(self.messages, self.llm)
+                    self.messages.insert(0, {"role": "system", "content": self.system_prompt})
+                    yield ("compact_end", {"mode": "auto", "tokens_after": estimate_tokens(self.messages)})
+
             reminder = mark_todo_round(False)
             if reminder:
                 self.messages.append({"role": "system", "content": f"[TodoWrite 提醒] {reminder}"})
@@ -100,7 +144,15 @@ class Agent:
             tool_calls = self.llm.parse_tool_calls(response)
 
             if not tool_calls:
-                yield ("text", assistant_msg.get("content", ""))
+                content = assistant_msg.get("content", "")
+                if ENABLE_COMPACTION and "[COMPACT]" in content:
+                    logger.info("LLM 请求手动压缩 (Layer 3)")
+                    yield ("compact_start", {"mode": "manual", "tokens_before": estimate_tokens(self.messages)})
+                    self.messages[:] = auto_compact(self.messages, self.llm)
+                    self.messages.insert(0, {"role": "system", "content": self.system_prompt})
+                    yield ("compact_end", {"mode": "manual", "tokens_after": estimate_tokens(self.messages)})
+                    continue
+                yield ("text", content)
                 return
 
             had_todo = any(tc["name"] == "todo_write" for tc in tool_calls)
@@ -117,10 +169,20 @@ class Agent:
                 except Exception as e:
                     result = f"工具执行出错: {e}"
 
-                yield ("tool_end", {"name": tool_name, "result_preview": result[:500]})
+                yield ("tool_end", {"name": tool_name, "result_preview": result[:200]})
+
+                if tool_name == "todo_write":
+                    try:
+                        from tools.todo_write import get_todo_manager
+                        todo_items = get_todo_manager().items
+                        yield ("todo_update", todo_items)
+                    except Exception:
+                        pass
+
                 self.messages.append(self.llm.format_tool_result(tool_id, result))
 
             mark_todo_round(had_todo)
+            yield ("round_end", {"round": iteration + 1})
 
         yield ("text", "已达到最大工具调用次数。")
 

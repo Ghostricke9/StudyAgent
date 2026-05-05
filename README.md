@@ -543,6 +543,123 @@ class Agent:
 
 ---
 
+### 伪例 4：Subagent 子任务拆分工具（已内置本项目）
+
+这是本项目**已实现**的另一个重要工具，展示了"消息隔离 + 分治法"模式。
+
+**问题背景：** Agent 工作越久，`messages` 数组越臃肿——每一轮的工具调用和结果都被追加到消息历史中。在长任务中，这会导致：
+- context window 被大量工具调用记录占满
+- LLM 容易被过长的历史分散注意力
+- 不同子任务的信息互相污染
+
+Subagent 的解决方案：**大任务拆小，message 分离，每个子任务用全新上下文执行。**
+
+```
+主 Agent (Parent)                    子 Agent 1 (Child)              子 Agent 2 (Child)
+┌────────────────────┐              ┌──────────────────┐            ┌──────────────────┐
+│ messages:          │              │ messages:        │            │ messages:        │
+│ [system, user,     │              │ [sub_system,     │            │ [sub_system,     │
+│  assistant, tool,  │   task()     │  user_prompt,    │   task()   │  user_prompt,    │
+│  assistant, tool,  │──────────────│  assistant,      │────────────│  assistant,      │
+│  ...数十轮...]     │  返回摘要     │  tool, ...]      │  返回摘要   │  tool, ...]      │
+│                    │◄─────────────│                  │◄───────────│                  │
+│                    │              │  ← 上下文隔离 →   │            │  ← 上下文隔离 →   │
+└────────────────────┘              └──────────────────┘            └──────────────────┘
+```
+
+**工具分层设计：**
+
+```python
+# 主 Agent 工具集 = 子 Agent 工具集 + task 工具
+PARENT_TOOLS = CHILD_TOOLS + [task]
+# 子 Agent 工具集 = 所有本地工具（不含 task，防止递归爆炸）
+CHILD_TOOLS = {web_search, fetch_webpage, save_document, load_skill, todo_write}
+```
+
+**核心代码解析：**
+
+```python
+# tools/subagent.py 的核心逻辑
+
+from agent.llm_client import LLMClient
+from config import SUBAGENT_MAX_TOOL_CALLS, build_subagent_system_prompt
+
+def run_subagent(prompt: str) -> str:
+    """主 Agent 调用此函数 spawn 一个子 Agent"""
+    llm = LLMClient()
+    system_prompt = build_subagent_system_prompt()
+
+    # 全新的 messages 数组 —— 上下文隔离的关键！
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},   # 只有主 Agent 传过来的 prompt
+    ]
+
+    # 子 Agent 自己的 ReAct 循环
+    for iteration in range(SUBAGENT_MAX_TOOL_CALLS):
+        response = llm.chat(messages=messages, tools=CHILD_TOOL_SCHEMAS)
+        assistant_msg = llm.assistant_message(response)
+
+        if assistant_msg is None:
+            break
+
+        messages.append(assistant_msg)
+
+        tool_calls = llm.parse_tool_calls(response)
+        if not tool_calls:
+            # 子 Agent 完成 → 返回文本摘要给主 Agent
+            return assistant_msg.get("content", "")
+
+        # 执行子 Agent 的工具调用
+        for tc in tool_calls:
+            handler = CHILD_TOOLS.get(tc["name"])
+            result = handler(**tc["arguments"])
+            messages.append(llm.format_tool_result(tc["id"], result))
+
+    return "(Subagent 已达到最大工具调用次数)"
+```
+
+**完整调用时序：**
+
+```
+主 Agent 轮次 1-3: 搜索、抓取、分析... messages 已累积 12 条
+
+主 Agent 轮次 4: 决定分治法 → 调用 task(prompt="搜索微积分入门资料并返回3篇最佳文章摘要")
+  ├── run_subagent() 被调用
+  │   ├── sub_messages = [sub_system, user_prompt]  ← 全新的 2 条消息
+  │   ├── 子轮1: web_search("微积分入门教程")        ← sub_messages: 4 条
+  │   ├── 子轮2: fetch_webpage(url1)                  ← sub_messages: 6 条
+  │   ├── 子轮3: fetch_webpage(url2)                  ← sub_messages: 8 条
+  │   ├── 子轮4: 返回 "以下是3篇最佳文章摘要..."      ← 纯文本完成
+  │   └── 返回摘要字符串给主 Agent
+  └── 主 Agent 收到: "tool_result: 以下是3篇..."
+
+主 Agent messages: 只增加了 1 条 tool_result（而不是子 Agent 内部的 8 条）
+主 Agent 轮次 5: 用收到的摘要继续工作，messages 依然清爽
+```
+
+**对比：不用 vs 用 Subagent：**
+
+| 维度 | 不用 Subagent | 用 Subagent |
+|------|--------------|-------------|
+| 主对话 messages 增长 | 每个工具调用都追加，线性膨胀 | 只追加 1 条 tool_result |
+| 信息隔离 | 所有信息混在一起 | 子任务独立上下文 |
+| 并行能力 | 不支持（串行调用） | 可同时派发多个子 Agent |
+| LLM 注意力 | 容易被长历史分散 | 每个 Agent 上下文都清爽 |
+| 适用场景 | 简单任务（3-5步） | 复杂大任务（10+步） |
+
+**设计要点：**
+
+| 要点 | 说明 |
+|------|------|
+| 消息隔离 | `run_subagent` 内部创建全新的 `messages` 数组，与主 Agent 的 `self.messages` 完全独立 |
+| 递归防护 | 子 Agent 的工具集 `CHILD_TOOLS` 不含 `task` 工具，防止子 Agent 再产生孙 Agent |
+| Prompt 完整性 | 给子 Agent 的 prompt 必须包含所有必要上下文，因为它看不到主对话历史 |
+| 安全上限 | `SUBAGENT_MAX_TOOL_CALLS` 独立于主 Agent 的 `MAX_TOOL_CALLS`，默认 15 轮 |
+| 返回格式 | 子 Agent 返回纯文本摘要，作为 `tool_result` 注入主 Agent 对话 |
+
+---
+
 ## 5. 教学：如何添加自己的 Skill（渐进式披露）
 
 ### Skill 的本质
@@ -726,6 +843,160 @@ print(f"总字数: {count_words(text)}")
 | 脚本最小化 | 脚本应该是简洁的单文件，有明确的输入输出，便于 LLM 理解和执行 |
 | 模板用 Markdown | 全文统一 Markdown 格式，减少 LLM 需要处理的文件类型 |
 | 引用清晰 | SKILL.md 中明确标注每个子文件的路径和用途 |
+
+---
+
+## 5.5 上下文压缩：三层 Token 管理（已内置本项目）
+
+### 问题背景
+
+Agent 工作越久，`messages` 数组越臃肿——每一次工具调用和结果都被追加到对话历史。在长任务中这会导致：
+- Token 使用量线性增长，逼近模型的 context window 上限
+- 很旧的工具结果早已过时，却仍然占据大量 Token
+- LLM 在决策时容易被远古历史干扰
+
+本项目的解决方案是**三层上下文压缩**，按「无感 → 重压缩 → 自救」递进：
+
+```
+Layer 1: micro_compact  — 每轮自动运行，裁剪旧的 tool 结果
+Layer 2: auto_compact   — 超过 Token 阈值自动触发，LLM 摘要后替换全部历史
+Layer 3: manual_compact — LLM 主动输出 [COMPACT] 请求压缩
+```
+
+### Layer 1：静默裁剪（micro_compact）
+
+每轮循环开始时自动执行，对 LLM 完全透明。逻辑极简：
+
+```
+扫描 messages 中所有 role="tool" 的消息
+只保留最近 N 条（KEEP_RECENT_TOOLS=6）保持完整
+其余的 tool 结果 → 内容超过 150 字符就替换为 "[已压缩 原工具结果过长] snippet..."
+```
+
+**这是一种"截断为摘要"的策略**——不删除消息（会破坏 tool_call_id 追踪），而是大幅缩减内容。
+
+```python
+# agent/compactor.py 核心逻辑
+
+def micro_compact(messages: list[dict]) -> list[dict]:
+    tool_indices = [i for i, msg in enumerate(messages) if msg["role"] == "tool"]
+    if len(tool_indices) <= KEEP_RECENT_TOOLS:
+        return messages  # 还不到阈值，不做任何事
+
+    for idx in tool_indices[:-KEEP_RECENT_TOOLS]:  # 除了最近的 6 条
+        content = messages[idx].get("content", "")
+        if len(content) > 150:
+            snippet = content[:100].replace("\n", " ").strip()
+            messages[idx]["content"] = f"[已压缩 原工具结果过长] {snippet}..."
+    return messages
+```
+
+**调用位置（agent/core.py）：**
+
+```
+for iteration in range(MAX_TOOL_CALLS):
+    micro_compact(self.messages)        # ← Layer 1：每轮开始自动执行
+    ...
+    response = self.llm.chat(...)
+```
+
+### Layer 2：自动摘要压缩（auto_compact）
+
+当 `estimate_tokens(messages) > COMPACT_TOKEN_THRESHOLD`（默认 12000）时触发：
+
+1. **存档**：将完整 messages 写入 `transcripts/transcript_{timestamp}.jsonl`，确保数据不丢失
+2. **摘要**：发一条单独的 LLM 请求，要求生成连续性摘要
+3. **替换**：messages 被压缩为单条 system 消息（含摘要），然后重新插入 system prompt
+
+```python
+# agent/compactor.py
+
+def auto_compact(messages: list[dict], llm) -> list[dict]:
+    # 1. 存档
+    transcript_path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
+    with open(transcript_path, "w") as f:
+        for msg in messages:
+            f.write(json.dumps(msg, default=str) + "\n")
+
+    # 2. LLM 生成摘要
+    summary_prompt = "请将以下对话历史压缩为一份连续摘要..." + json.dumps(messages)[:80000]
+    response = llm.chat(messages=[{"role": "user", "content": summary_prompt}], tools=None)
+    summary = response.choices[0].message.content
+
+    # 3. 替换
+    return [{"role": "system", "content": f"[对话已压缩]\n\n{summary}"}]
+```
+
+**核心设计约束：**
+- **不在主循环中同步等待** —— 这是唯一会阻塞的地方，但只在大阈值才触发
+- **保留 system prompt** —— 压缩后 `self.messages.insert(0, {"role": "system", "content": self.system_prompt})` 确保 Agent 人格不丢失
+- **摘要的摘要** —— 摘要中包含「用户最初目标 + 已完成步骤 + 当前进度 + 核心信息」
+
+### Layer 3：LLM 自救（manual_compact）
+
+LLM 可以在回复中输出 `[COMPACT]` 来主动请求压缩。这发生在 LLM 意识到上下文太长但还没到阈值、或者 LLM 发现自己需要清空历史才能继续思考时。
+
+```python
+# agent/core.py 中的检测逻辑
+
+if not tool_calls:
+    content = assistant_msg.get("content", "")
+    if "[COMPACT]" in content:
+        # 与 Layer 2 同样的压缩流程
+        self.messages[:] = auto_compact(self.messages, self.llm)
+        self.messages.insert(0, {"role": "system", "content": self.system_prompt})
+        continue  # 压缩后继续循环，不返回给用户
+    return content  # 正常完成，返回给用户
+```
+
+系统提示词中明确告知 LLM 这个能力：
+```
+## 上下文管理
+对话历史会在每轮自动进行轻量压缩（裁剪旧工具结果）。
+当上下文极度过长时，你可以输出 `[COMPACT]` 来触发完整压缩。
+```
+
+### 完整调用时序
+
+```
+第 1-10 轮: micro_compact 每轮执行，但 tool 消息还不到 6 条 → 不做任何事
+第 11 轮: micro_compact 开始裁剪第 3-5 轮的 tool 结果
+第 15 轮: 大量网页抓取导致 Token 暴涨
+  → estimate_tokens: 14500 > 12000 (阈值)
+  → auto_compact 触发:
+     1. 存档 → transcripts/transcript_1716000000.jsonl
+     2. LLM 摘要 → "用户想学微积分，已完成搜索和抓取，正在编撰第3章..."
+     3. messages 从 47 条压缩为 2 条 [system_prompt, 摘要]
+  → 终端显示: "⚡ 上下文压缩触发 (auto): 14500 tokens → 压缩中..."
+             "✓ 压缩完成: 剩余 623 tokens"
+第 16 轮: 基于摘要继续工作，messages 只有 4 条
+
+...20 轮后，LLM 发现上下文又很长了...
+第 36 轮: LLM 输出 "[COMPACT]" (没有工具调用)
+  → manual_compact 触发，同样流程
+  → 终端显示: "⚡ 上下文压缩触发 (manual): 11000 tokens → 压缩中..."
+```
+
+### 对比：不用 vs 用三层压缩
+
+| 维度 | 不用压缩 | 用三层压缩 |
+|------|---------|-----------|
+| Token 增长 | 线性增长，迟早超标 | 锯齿形——积累到阈值就压缩 |
+| 旧工具结果 | 始终占满 Token | 被自动裁剪为摘要 |
+| 数据安全 | — | 每次压缩前存档到 jsonl |
+| 成本 | 长对话越来越贵 | 用少量摘要 Token 换大量历史 Token |
+| LLM 决策质量 | 被远古信息干扰 | 上下文始终保持清新 |
+
+### 设计要点
+
+| 要点 | 说明 |
+|------|------|
+| 原地修改 | `micro_compact` 直接修改传入的 messages 列表，不创建副本 |
+| 不删消息 | 裁剪 strategy 是「截断内容」而非「删除消息」，保留 tool_call_id 追踪链 |
+| 存档优先 | `auto_compact` 先存档再压缩，压缩失败也有恢复手段 |
+| 摘要质量 | 摘要 prompt 明确要求保留「目标、结果、进度、核心信息」四个维度 |
+| Token 估算 | 优先使用 `tiktoken` 精确估算，降级使用 `chars/3` 粗略估算 |
+| 环境变量可调 | `COMPACT_TOKEN_THRESHOLD`、`KEEP_RECENT_TOOLS`、`TRANSCRIPT_DIR` 均可通过 .env 配置 |
 
 ---
 
@@ -971,6 +1242,7 @@ studyhelper/
 │
 ├── agent/                      # Agent 核心
 │   ├── core.py                 # ReAct 主循环（Harness 核心）
+│   ├── compactor.py            # 三层上下文压缩（Token 管理）
 │   └── llm_client.py           # LLM 客户端（Function Call 封装）
 │
 ├── tools/                      # 本地工具层
@@ -979,7 +1251,8 @@ studyhelper/
 │   ├── web_fetch.py            # 网页正文抓取 + 清洗
 │   ├── file_tools.py           # 文件保存 / 读取
 │   ├── load_skill.py           # Skill 按需加载（Layer 2 入口）
-│   └── todo_write.py           # 多步任务进度管理（防丢失+强制顺序聚焦）
+│   ├── todo_write.py           # 多步任务进度管理（防丢失+强制顺序聚焦）
+│   └── subagent.py              # 子任务拆分与上下文隔离（Subagent 模式）
 │
 ├── skills/                     # Skills 技能层（渐进式披露）
 │   ├── registry.py             # SkillLoader: rglob("SKILL.md") 自动扫描
@@ -1095,6 +1368,8 @@ class Agent:
 | Context Window 管理 | 本项目未实现 | 需自己补充（见进阶第3步） |
 | Tool 并行执行 | 本项目未实现 | 需自己补充（见进阶第4步） |
 | TodoWrite 任务管理 | `tools/todo_write.py` + `agent/core.py` 注入逻辑 | 防丢失 + 强制顺序聚焦 |
+| Subagent 子任务拆分 | `tools/subagent.py` + `tools/executor.py` 工具分层 | 消息隔离 + 分治法 |
+| 三层上下文压缩 | `agent/compactor.py` + `agent/core.py` 集成 | Token 管理 + 防溢出 |
 | 任务管理系统（多agent协作基础） | 本项目未实现 | 需自己补充 |
 | background_task | 本项目未实现 | 需自己补充 |
 | agent_teams | 本项目未实现 | 需自己补充 |

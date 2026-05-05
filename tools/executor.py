@@ -3,6 +3,10 @@
 
 Agent 通过此模块获得完整的工具调用能力。
 Skills 采用渐进式披露：Layer 1 注入 system prompt，Layer 2 通过 load_skill 获取正文。
+
+工具分层：
+  PARENT_TOOLS = CHILD_TOOLS + task（主 Agent 用，可派发子任务）
+  CHILD_TOOLS  = 所有本地工具（子 Agent 用，不含 task 防止递归爆炸）
 """
 import json
 import logging
@@ -12,6 +16,7 @@ from tools.web_fetch import fetch_webpage, TOOL_SCHEMA as FETCH_SCHEMA
 from tools.file_tools import save_document, TOOL_SCHEMA as SAVE_SCHEMA
 from tools.load_skill import load_skill, TOOL_SCHEMA as LOAD_SKILL_SCHEMA
 from tools.todo_write import todo_write, TOOL_SCHEMA as TODO_SCHEMA, mark_todo_round
+from tools.subagent import run_subagent, TASK_SCHEMA, CHILD_TOOLS, CHILD_TOOL_SCHEMAS
 from mcp.manager import MCPManager
 
 logger = logging.getLogger(__name__)
@@ -22,9 +27,10 @@ LOCAL_TOOLS: dict[str, callable] = {
     "save_document": save_document,
     "load_skill": load_skill,
     "todo_write": todo_write,
+    "task": run_subagent,
 }
 
-LOCAL_TOOL_SCHEMAS = [SEARCH_SCHEMA, FETCH_SCHEMA, SAVE_SCHEMA, LOAD_SKILL_SCHEMA, TODO_SCHEMA]
+LOCAL_TOOL_SCHEMAS = [SEARCH_SCHEMA, FETCH_SCHEMA, SAVE_SCHEMA, LOAD_SKILL_SCHEMA, TODO_SCHEMA, TASK_SCHEMA]
 
 
 class ToolBridge:
